@@ -1,0 +1,19 @@
+{
+  "name": "shientenminutes",
+  "version": "1.0.0",
+  "main": "index.js",
+ "scripts": {
+    "start": "node monitor.js",
+    "test": "node monitor.js --test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.13.4",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "puppeteer": "^24.36.1"
+  }
+}
