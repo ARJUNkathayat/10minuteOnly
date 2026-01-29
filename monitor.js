@@ -40,19 +40,19 @@ const CONFIG = {
   snapshotFile: "stock.json",
 
   maxRetries: 2,
-  retryDelay: 5000,
+  retryDelay: 6000,
 
-  normalUpdateLinks: 20,
+  normalUpdateLinks: 15,
   alertThreshold: 30,
-  alertLinksCount: 15,
+  alertLinksCount: 12,
 
-  maxLinksPerCategory: 10,
-  scrapeCooldownMs: 4000,
+  maxLinksPerCategory: 8,
+  scrapeCooldownMs: 5000,
 
-  categorySendThreshold: 35,   // 🔥 Only send category links if filtered >= 35
+  categorySendThreshold: 5, // ✅ lowered so you actually get category messages
 };
 
-// ================= TELEGRAM (AUTO SPLIT SAFE) =================
+// ================= TELEGRAM =================
 
 async function sendTelegram(text) {
   const url = `https://api.telegram.org/bot${CONFIG.telegramBotToken}/sendMessage`;
@@ -102,6 +102,8 @@ async function scrapeCategory(category, retry = 0) {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
+        "--single-process",
+        "--no-zygote",
       ],
     });
 
@@ -129,8 +131,9 @@ async function scrapeCategory(category, retry = 0) {
       timeout: 90000,
     });
 
-    await page.waitForSelector("a.rilrtl-products-list__link", {
-      timeout: 45000,
+    // ✅ Stable selector (not CSS class dependent)
+    await page.waitForSelector("a[href*='/product']", {
+      timeout: 60000,
     });
 
     await new Promise((r) => setTimeout(r, 3000));
@@ -144,7 +147,7 @@ async function scrapeCategory(category, retry = 0) {
         document.querySelectorAll(".item")
       ).map((item) => {
         const link =
-          item.querySelector("a.rilrtl-products-list__link")?.href || null;
+          item.querySelector("a[href*='/product']")?.href || null;
         const title =
           item.querySelector(".product-item__name")?.innerText ||
           item.innerText ||
@@ -158,7 +161,7 @@ async function scrapeCategory(category, retry = 0) {
 
     await browser.close();
 
-    if (!data.totalItems) throw new Error("No products detected");
+    if (!data.products.length) throw new Error("No products detected");
 
     return data;
   } catch (err) {
@@ -205,33 +208,19 @@ function classifyProducts(products) {
     if (!p.link) continue;
     const name = p.title.toLowerCase();
 
-    if (name.includes("t-shirt") || name.includes("tshirt")) {
+    if (name.includes("t-shirt") || name.includes("tshirt"))
       buckets.tshirt.push(p.link);
-    }
-    if (name.includes("hoodie")) {
-      buckets.hoodie.push(p.link);
-    }
-    if (name.includes("sweatshirt")) {
-      buckets.sweatshirt.push(p.link);
-    }
-    if (name.includes("cardigan")) {
-      buckets.cardigan.push(p.link);
-    }
-    if (name.includes("jean")) {
-      buckets.jeans.push(p.link);
-    }
-    if (name.includes("pant") && !name.includes("trackpant")) {
+    if (name.includes("hoodie")) buckets.hoodie.push(p.link);
+    if (name.includes("sweatshirt")) buckets.sweatshirt.push(p.link);
+    if (name.includes("cardigan")) buckets.cardigan.push(p.link);
+    if (name.includes("jean")) buckets.jeans.push(p.link);
+    if (name.includes("pant") && !name.includes("trackpant"))
       buckets.pants.push(p.link);
-    }
-    if (name.includes("trouser")) {
-      buckets.trouser.push(p.link);
-    }
-    if (name.includes("trackpant") || name.includes("track pant")) {
+    if (name.includes("trouser")) buckets.trouser.push(p.link);
+    if (name.includes("trackpant") || name.includes("track pant"))
       buckets.trackpant.push(p.link);
-    }
-    if (name.includes("pyjama") || name.includes("pajama")) {
+    if (name.includes("pyjama") || name.includes("pajama"))
       buckets.pyjama.push(p.link);
-    }
   }
 
   return buckets;
@@ -250,8 +239,6 @@ async function runOnce() {
 
   let filteredProducts = [];
   let filteredTotal = 0;
-
-  // ===== Sequential scrape (safe for Render) =====
 
   const results = [];
 
@@ -311,31 +298,6 @@ Removed: -${removed}`;
     }
   });
 
-  // ================= ALERT =================
-
-  const previousFiltered = snapshot?.MEN_FILTERED?.totalItems || 0;
-  const crossedUp =
-    previousFiltered < CONFIG.alertThreshold &&
-    filteredTotal >= CONFIG.alertThreshold;
-
-  if (crossedUp) {
-    const alertLinks = filteredProducts
-      .slice(0, CONFIG.alertLinksCount)
-      .map((p) => `• ${p.link}`)
-      .join("\n");
-
-    const alertMsg = `🚨🚨🚨 FILTERED STOCK ALERT 🚨🚨🚨
-
-MEN Filtered stock crossed ${CONFIG.alertThreshold}+
-
-Current Stock: ${filteredTotal}
-
-🔥 Top ${CONFIG.alertLinksCount} Products:
-${alertLinks || "No links found"}`;
-
-    await sendTelegram(alertMsg);
-  }
-
   saveSnapshot(newSnapshot);
 
   // ================= NORMAL UPDATE =================
@@ -362,12 +324,10 @@ Updated: ${time}`;
 
   await sendTelegram(message);
 
-  // ================= CATEGORY SPLIT (ONLY IF THRESHOLD MET) =================
+  // ================= CATEGORY SPLIT =================
 
   if (filteredTotal >= CONFIG.categorySendThreshold) {
-    console.log(
-      `✅ Filtered stock >= ${CONFIG.categorySendThreshold} → Sending category messages`
-    );
+    console.log(`✅ Sending category split messages`);
 
     const buckets = classifyProducts(filteredProducts);
 
@@ -399,7 +359,7 @@ ${links}`;
     }
   } else {
     console.log(
-      `ℹ️ Filtered stock (${filteredTotal}) < ${CONFIG.categorySendThreshold} → Skipping category messages`
+      `ℹ️ Filtered stock (${filteredTotal}) < ${CONFIG.categorySendThreshold}`
     );
   }
 }
@@ -407,4 +367,4 @@ ${links}`;
 // ================= SCHEDULER =================
 
 runOnce();
-setInterval(runOnce, 6 * 60 * 1000); 
+setInterval(runOnce, 10 * 60 * 1000); // every 10 minutes
