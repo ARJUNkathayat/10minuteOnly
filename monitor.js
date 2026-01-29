@@ -42,14 +42,11 @@ const CONFIG = {
   maxRetries: 2,
   retryDelay: 6000,
 
-  normalUpdateLinks: 15,
-  alertThreshold: 30,
-  alertLinksCount: 12,
-
+  normalUpdateLinks: 12,
   maxLinksPerCategory: 8,
   scrapeCooldownMs: 5000,
 
-  categorySendThreshold: 5, // ✅ lowered so you actually get category messages
+  categorySendThreshold: 5,
 };
 
 // ================= TELEGRAM =================
@@ -102,8 +99,8 @@ async function scrapeCategory(category, retry = 0) {
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--single-process",
         "--no-zygote",
+        "--single-process",
       ],
     });
 
@@ -131,33 +128,51 @@ async function scrapeCategory(category, retry = 0) {
       timeout: 90000,
     });
 
-    // ✅ Stable selector (not CSS class dependent)
+    // wait for product anchors
     await page.waitForSelector("a[href*='/product']", {
       timeout: 60000,
     });
 
-    await new Promise((r) => setTimeout(r, 3000));
+    // ✅ Auto scroll to load lazy items
+    await page.evaluate(async () => {
+      await new Promise((resolve) => {
+        let totalHeight = 0;
+        const distance = 600;
+        const timer = setInterval(() => {
+          window.scrollBy(0, distance);
+          totalHeight += distance;
 
+          if (totalHeight >= document.body.scrollHeight) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 400);
+      });
+    });
+
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // ✅ Robust extraction
     const data = await page.evaluate(() => {
       const countText =
         document.querySelector(".length strong")?.innerText || "";
       const totalItems = parseInt(countText.match(/\d+/)?.[0] || "0");
 
-      const products = Array.from(
-        document.querySelectorAll(".item")
-      ).map((item) => {
-        const link =
-          item.querySelector("a[href*='/product']")?.href || null;
-        const title =
-          item.querySelector(".product-item__name")?.innerText ||
-          item.innerText ||
-          "";
+      const anchors = Array.from(
+        document.querySelectorAll("a[href*='/product']")
+      );
 
-        return { link, title };
-      });
+      const products = anchors.map((a) => ({
+        link: a.href,
+        title: a.innerText?.trim() || "",
+      }));
 
       return { totalItems, products };
     });
+
+    console.log(
+      `📦 ${category.key} -> total: ${data.totalItems}, scraped: ${data.products.length}`
+    );
 
     await browser.close();
 
@@ -302,7 +317,11 @@ Removed: -${removed}`;
 
   // ================= NORMAL UPDATE =================
 
-  const normalLinks = filteredProducts
+  const linksSource = filteredProducts.length
+    ? filteredProducts
+    : snapshot["MEN_ALL"]?.products || [];
+
+  const normalLinks = linksSource
     .slice(0, CONFIG.normalUpdateLinks)
     .map((p) => `• ${p.link}`)
     .join("\n");
@@ -317,7 +336,7 @@ ${menSection}
 
 ${filteredSection}
 
-🔗 Top ${CONFIG.normalUpdateLinks} Filtered Links:
+🔗 Top Links:
 ${normalLinks || "No links found"}
 
 Updated: ${time}`;
@@ -332,15 +351,15 @@ Updated: ${time}`;
     const buckets = classifyProducts(filteredProducts);
 
     const categoryMessages = [
-      { title: "👕 T-SHIRTS", data: buckets.tshirt },
-      { title: "🧥 HOODIES", data: buckets.hoodie },
-      { title: "🧥 SWEATSHIRTS", data: buckets.sweatshirt },
-      { title: "🧶 CARDIGANS", data: buckets.cardigan },
-      { title: "👖 JEANS", data: buckets.jeans },
-      { title: "👖 PANTS", data: buckets.pants },
-      { title: "👖 TROUSERS", data: buckets.trouser },
-      { title: "🏃 TRACKPANTS", data: buckets.trackpant },
-      { title: "💤 PYJAMA", data: buckets.pyjama },
+      { title: "T-SHIRTS", data: buckets.tshirt },
+      { title: "HOODIES", data: buckets.hoodie },
+      { title: "SWEATSHIRTS", data: buckets.sweatshirt },
+      { title: "CARDIGANS", data: buckets.cardigan },
+      { title: "JEANS", data: buckets.jeans },
+      { title: "PANTS", data: buckets.pants },
+      { title: "TROUSERS", data: buckets.trouser },
+      { title: "TRACKPANTS", data: buckets.trackpant },
+      { title: "PYJAMA", data: buckets.pyjama },
     ];
 
     for (const cat of categoryMessages) {
@@ -357,10 +376,6 @@ ${links}`;
 
       await sendTelegram(msg);
     }
-  } else {
-    console.log(
-      `ℹ️ Filtered stock (${filteredTotal}) < ${CONFIG.categorySendThreshold}`
-    );
   }
 }
 
