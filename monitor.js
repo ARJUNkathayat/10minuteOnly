@@ -138,6 +138,7 @@ async function scrapeMenProducts() {
 // ================= MAIN =================
 
 async function runOnce() {
+
   console.log("🔄 Running SHEIN monitor By Arjun…");
 
   // -------- STOCK SUMMARY --------
