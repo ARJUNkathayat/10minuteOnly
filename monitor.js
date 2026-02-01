@@ -10,9 +10,11 @@ const CONFIG = {
     "https://sheinindia.in/sheinverse/c/sverse-5939-37961?query=%3Arelevance%3Agenderfilter%3AMen",
   SNAPSHOT: "men_snapshot.json",
   INTERVAL_MS: 5 * 60 * 1000, // 5 min
-  TG_MAX_LEN: 3800, // safe chunk
-  TG_DELAY_MS: 800, // anti-flood
-  MAX_ITEMS_PER_ALERT: 25, // safety cap
+
+  // Telegram safety
+  TG_MAX_LEN: 3800,
+  TG_DELAY_MS: 800,
+  MAX_ITEMS_PER_ALERT: 25,
 };
 
 // ================= TELEGRAM =================
@@ -123,7 +125,7 @@ async function runOnce() {
   const oldIds = new Set(oldData.map((p) => p.id));
   const added = newData.filter((p) => !oldIds.has(p.id));
 
-  // Update snapshot FIRST TIME SAFE
+  // update snapshot every run
   saveSnapshot(newData);
 
   if (!added.length) {
@@ -131,7 +133,6 @@ async function runOnce() {
     return;
   }
 
-  // limit to avoid flood (still all detected internally)
   const sendList = added.slice(0, CONFIG.MAX_ITEMS_PER_ALERT);
 
   let message = `🆕 MEN STOCK ALERT 🚨
