@@ -1,2 +1,6 @@
 /node_modules
 stock.json\.env
+
+node_modules/
+.env
+men_snapshot.json
