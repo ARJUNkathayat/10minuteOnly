@@ -16,28 +16,14 @@ const CONFIG = {
 
   INTERVAL_MS: 5 * 60 * 1000,
 
-  // Telegram safety
   TG_MAX_LEN: 3800,
   TG_DELAY_MS: 800,
   MAX_ITEMS_PER_ALERT: 25,
 };
 
-// ================= TELEGRAM =================
+// ================= UTIL =================
 
-async function sendTelegramBatched(text) {
-  const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
-
-  for (let i = 0; i < text.length; i += CONFIG.TG_MAX_LEN) {
-    await axios.post(url, {
-      chat_id: process.env.TELEGRAM_CHAT_ID,
-      text: text.slice(i, i + CONFIG.TG_MAX_LEN),
-      disable_web_page_preview: true,
-    });
-    await new Promise((r) => setTimeout(r, CONFIG.TG_DELAY_MS));
-  }
-}
-
-// ================= SNAPSHOT HELPERS =================
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function loadJSON(file, fallback) {
   try {
@@ -52,64 +38,92 @@ function saveJSON(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-// ================= COUNT SCRAPER =================
+// ================= TELEGRAM =================
 
-async function scrapeCount(url) {
+async function sendTelegramBatched(text) {
+  const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+
+  for (let i = 0; i < text.length; i += CONFIG.TG_MAX_LEN) {
+    await axios.post(
+      url,
+      {
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text: text.slice(i, i + CONFIG.TG_MAX_LEN),
+        disable_web_page_preview: true,
+      },
+      { timeout: 10000 }
+    );
+    await sleep(CONFIG.TG_DELAY_MS);
+  }
+}
+
+// ================= BROWSER =================
+
+async function launchBrowser() {
   const browser = await puppeteer.launch({
     headless: "new",
-    args: ["--no-sandbox"],
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 
   const page = await browser.newPage();
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForSelector(".length strong");
 
-  const count = await page.evaluate(() => {
-    const txt =
-      document.querySelector(".length strong")?.innerText || "";
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+  );
+
+  await page.setViewport({ width: 1366, height: 768 });
+
+  // webdriver masking
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", {
+      get: () => false,
+    });
+  });
+
+  return { browser, page };
+}
+
+// ================= SCRAPERS =================
+
+async function scrapeCount(page, url) {
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.waitForSelector(".length strong", { timeout: 30000 });
+
+  return page.evaluate(() => {
+    const txt = document.querySelector(".length strong")?.innerText || "";
     const m = txt.match(/\d+/);
     return m ? Number(m[0]) : 0;
   });
-
-  await browser.close();
-  return count;
 }
 
-// ================= MEN PRODUCT SCRAPER =================
-
-async function scrapeMenProducts() {
-  const browser = await puppeteer.launch({
-    headless: "new",
-    args: ["--no-sandbox"],
-  });
-
-  const page = await browser.newPage();
+async function scrapeMenProducts(page) {
   await page.goto(CONFIG.MEN_URL, {
     waitUntil: "domcontentloaded",
     timeout: 90000,
   });
 
   await page.waitForSelector(
-    "a.rilrtl-products-list__link.desktop"
+    "a.rilrtl-products-list__link.desktop",
+    { timeout: 30000 }
   );
 
-  // ReactVirtualized scroll
+  // Scroll until no new items load
   await page.evaluate(async () => {
-    await new Promise((resolve) => {
-      let y = 0;
-      const step = 900;
-      const t = setInterval(() => {
-        window.scrollBy(0, step);
-        y += step;
-        if (y > document.body.scrollHeight) {
-          clearInterval(t);
-          resolve();
-        }
-      }, 400);
-    });
+    let lastCount = 0;
+    while (true) {
+      window.scrollBy(0, 1200);
+      await new Promise((r) => setTimeout(r, 700));
+
+      const currentCount = document.querySelectorAll(
+        "a.rilrtl-products-list__link.desktop"
+      ).length;
+
+      if (currentCount === lastCount) break;
+      lastCount = currentCount;
+    }
   });
 
-  const products = await page.evaluate(() => {
+  return page.evaluate(() => {
     const out = [];
     document
       .querySelectorAll("a.rilrtl-products-list__link.desktop")
@@ -118,98 +132,104 @@ async function scrapeMenProducts() {
         const m = href.match(/\/p\/(\d+)_?/);
         if (!m) return;
 
-        const id = m[1];
-        const title =
-          a.querySelector(".name")?.innerText?.trim() ||
-          a.querySelector(".name")?.getAttribute("aria-label") ||
-          "";
-        const price =
-          a.querySelector(".price strong")?.innerText || "";
-
-        out.push({ id, title, price, link: href });
+        out.push({
+          id: m[1],
+          title:
+            a.querySelector(".name")?.innerText?.trim() ||
+            a.querySelector(".name")?.getAttribute("aria-label") ||
+            "",
+          price: a.querySelector(".price strong")?.innerText || "",
+          link: href,
+        });
       });
     return out;
   });
-
-  await browser.close();
-  return products;
 }
 
-// ================= MAIN =================
+// ================= MAIN RUN =================
 
 async function runOnce() {
-
   console.log("🔄 Running SHEIN monitor By Arjun…");
 
-  // -------- STOCK SUMMARY --------
-  const prevCounts = loadJSON(CONFIG.SNAPSHOT_COUNT, {});
-  const menCount = await scrapeCount(CONFIG.MEN_URL);
-  const womenCount = await scrapeCount(CONFIG.WOMEN_URL);
+  const { browser, page } = await launchBrowser();
 
-  const menOld = prevCounts.MEN || 0;
-  const womenOld = prevCounts.WOMEN || 0;
+  try {
+    // ---- COUNT SUMMARY ----
+    const prevCounts = loadJSON(CONFIG.SNAPSHOT_COUNT, {});
+    const menCount = await scrapeCount(page, CONFIG.MEN_URL);
+    const womenCount = await scrapeCount(page, CONFIG.WOMEN_URL);
 
-  const summaryMsg = `📦 SHEIN STOCK UPDATE (5 min)
+    const summaryMsg = `📦 SHEIN STOCK UPDATE (5 min)
 
 MEN
 Total: ${menCount}
-Added: +${Math.max(0, menCount - menOld)}
-Removed: -${Math.max(0, menOld - menCount)}
+Added: +${Math.max(0, menCount - (prevCounts.MEN || 0))}
+Removed: -${Math.max(0, (prevCounts.MEN || 0) - menCount)}
 
 WOMEN
 Total: ${womenCount}
-Added: +${Math.max(0, womenCount - womenOld)}
-Removed: -${Math.max(0, womenOld - womenCount)}
+Added: +${Math.max(0, womenCount - (prevCounts.WOMEN || 0))}
+Removed: -${Math.max(0, (prevCounts.WOMEN || 0) - womenCount)}
 
-🕒 ${new Date().toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-  })}`;
+🕒 ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
 
-  await sendTelegramBatched(summaryMsg);
-  saveJSON(CONFIG.SNAPSHOT_COUNT, {
-    MEN: menCount,
-    WOMEN: womenCount,
-  });
+    await sendTelegramBatched(summaryMsg);
+    saveJSON(CONFIG.SNAPSHOT_COUNT, {
+      MEN: menCount,
+      WOMEN: womenCount,
+    });
 
-  // -------- MEN NEW PRODUCT ALERT --------
-  const oldMen = loadJSON(CONFIG.SNAPSHOT_MEN, []);
-  const newMen = await scrapeMenProducts();
+    // ---- MEN NEW PRODUCTS ----
+    const oldMen = loadJSON(CONFIG.SNAPSHOT_MEN, []);
+    const newMen = await scrapeMenProducts(page);
 
-  const oldIds = new Set(oldMen.map((p) => p.id));
-  const added = newMen.filter((p) => !oldIds.has(p.id));
+    const oldIds = new Set(oldMen.map((p) => p.id));
+    const added = newMen.filter((p) => !oldIds.has(p.id));
 
-  saveJSON(CONFIG.SNAPSHOT_MEN, newMen);
+    saveJSON(CONFIG.SNAPSHOT_MEN, newMen);
 
-  if (!added.length) {
-    console.log("ℹ️ No new MEN products");
-    return;
-  }
+    if (!added.length) {
+      console.log("ℹ️ No new MEN products");
+      return;
+    }
 
-  const sendList = added.slice(0, CONFIG.MAX_ITEMS_PER_ALERT);
-
-  let alertMsg = `🆕 MEN STOCK ALERT 🚨
+    let alertMsg = `🆕 MEN STOCK ALERT 🚨
 
 New Products Added: ${added.length}
 
 `;
 
-  sendList.forEach((p, i) => {
-    alertMsg += `${i + 1}) ${p.title}\n${p.price}\n${p.link}\n\n`;
-  });
+    added.slice(0, CONFIG.MAX_ITEMS_PER_ALERT).forEach((p, i) => {
+      alertMsg += `${i + 1}) ${p.title}\n${p.price}\n${p.link}\n\n`;
+    });
 
-  if (added.length > sendList.length) {
-    alertMsg += `… and ${added.length - sendList.length} more\n\n`;
+    if (added.length > CONFIG.MAX_ITEMS_PER_ALERT) {
+      alertMsg += `… and ${
+        added.length - CONFIG.MAX_ITEMS_PER_ALERT
+      } more\n\n`;
+    }
+
+    alertMsg += `🕒 ${new Date().toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+    })}`;
+
+    await sendTelegramBatched(alertMsg);
+    console.log(`🚨 MEN alert sent (${added.length})`);
+  } finally {
+    await browser.close();
   }
-
-  alertMsg += `🕒 ${new Date().toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-  })}`;
-
-  await sendTelegramBatched(alertMsg);
-  console.log(`🚨 MEN alert sent (${added.length})`);
 }
 
 // ================= SCHEDULER =================
 
-runOnce();
-setInterval(runOnce, CONFIG.INTERVAL_MS);
+(async () => {
+  await runOnce();
+
+  setInterval(async () => {
+    try {
+      await runOnce();
+    } catch (err) {
+      console.error("❌ Run failed:", err.message);
+    }
+  }, CONFIG.INTERVAL_MS);
+})();
