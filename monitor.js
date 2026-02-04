@@ -14,12 +14,19 @@ const CONFIG = {
   SNAPSHOT_COUNT: "count_snapshot.json",
   SNAPSHOT_MEN: "men_snapshot.json",
 
-  INTERVAL_MS: 5 * 60 * 1000,
+  INTERVAL_MS: 8 * 60 * 1000,
 
   TG_MAX_LEN: 3800,
   TG_DELAY_MS: 800,
+  TG_RETRY: 1,
+
   MAX_ITEMS_PER_ALERT: 25,
+  MAX_SCROLLS: 30,
 };
+
+// ================= GLOBAL LOCK =================
+
+let isRunning = false;
 
 // ================= UTIL =================
 
@@ -44,15 +51,28 @@ async function sendTelegramBatched(text) {
   const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
 
   for (let i = 0; i < text.length; i += CONFIG.TG_MAX_LEN) {
-    await axios.post(
-      url,
-      {
-        chat_id: process.env.TELEGRAM_CHAT_ID,
-        text: text.slice(i, i + CONFIG.TG_MAX_LEN),
-        disable_web_page_preview: true,
-      },
-      { timeout: 10000 }
-    );
+    let attempts = 0;
+    while (attempts <= CONFIG.TG_RETRY) {
+      try {
+        await axios.post(
+          url,
+          {
+            chat_id: process.env.TELEGRAM_CHAT_ID,
+            text: text.slice(i, i + CONFIG.TG_MAX_LEN),
+            disable_web_page_preview: true,
+          },
+          { timeout: 10000 }
+        );
+        break;
+      } catch (err) {
+        attempts++;
+        if (attempts > CONFIG.TG_RETRY) {
+          console.error("❌ Telegram send failed:", err.message);
+        } else {
+          await sleep(1000);
+        }
+      }
+    }
     await sleep(CONFIG.TG_DELAY_MS);
   }
 }
@@ -73,7 +93,6 @@ async function launchBrowser() {
 
   await page.setViewport({ width: 1366, height: 768 });
 
-  // webdriver masking
   await page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, "webdriver", {
       get: () => false,
@@ -87,10 +106,19 @@ async function launchBrowser() {
 
 async function scrapeCount(page, url) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.waitForSelector(".length strong", { timeout: 30000 });
+
+  await page.waitForFunction(
+    () =>
+      document.querySelector(".length strong") ||
+      document.querySelector("[data-test='product-count']"),
+    { timeout: 30000 }
+  );
 
   return page.evaluate(() => {
-    const txt = document.querySelector(".length strong")?.innerText || "";
+    const el =
+      document.querySelector(".length strong") ||
+      document.querySelector("[data-test='product-count']");
+    const txt = el?.innerText || "";
     const m = txt.match(/\d+/);
     return m ? Number(m[0]) : 0;
   });
@@ -102,54 +130,69 @@ async function scrapeMenProducts(page) {
     timeout: 90000,
   });
 
-  await page.waitForSelector(
-    "a.rilrtl-products-list__link.desktop",
-    { timeout: 30000 }
-  );
-
-  // Scroll until no new items load
-  await page.evaluate(async () => {
-    let lastCount = 0;
-    while (true) {
-      window.scrollBy(0, 1200);
-      await new Promise((r) => setTimeout(r, 700));
-
-      const currentCount = document.querySelectorAll(
-        "a.rilrtl-products-list__link.desktop"
-      ).length;
-
-      if (currentCount === lastCount) break;
-      lastCount = currentCount;
-    }
+  await page.waitForSelector("a.rilrtl-products-list__link", {
+    timeout: 30000,
   });
 
+  await page.evaluate(
+    async (MAX_SCROLLS) => {
+      let lastCount = 0;
+      let scrolls = 0;
+
+      while (scrolls < MAX_SCROLLS) {
+        window.scrollBy(0, 1200);
+        await new Promise((r) => setTimeout(r, 700));
+
+        const currentCount = document.querySelectorAll(
+          "a.rilrtl-products-list__link"
+        ).length;
+
+        if (currentCount === lastCount) break;
+
+        lastCount = currentCount;
+        scrolls++;
+      }
+    },
+    CONFIG.MAX_SCROLLS
+  );
+
   return page.evaluate(() => {
-    const out = [];
+    const products = [];
     document
-      .querySelectorAll("a.rilrtl-products-list__link.desktop")
+      .querySelectorAll("a.rilrtl-products-list__link")
       .forEach((a) => {
-        const href = a.href;
+        const href = a.href || "";
         const m = href.match(/\/p\/(\d+)_?/);
         if (!m) return;
 
-        out.push({
+        products.push({
           id: m[1],
           title:
             a.querySelector(".name")?.innerText?.trim() ||
             a.querySelector(".name")?.getAttribute("aria-label") ||
             "",
-          price: a.querySelector(".price strong")?.innerText || "",
+          price:
+            a.querySelector(".price strong")?.innerText ||
+            a.querySelector(".price")?.innerText ||
+            "",
           link: href,
         });
       });
-    return out;
+
+    return products;
   });
 }
 
 // ================= MAIN RUN =================
 
 async function runOnce() {
-  console.log("🔄 Running SHEIN monitor By Arjun…");
+  if (isRunning) {
+    console.log("⏳ Previous run still active, skipping...");
+    return;
+  }
+
+  isRunning = true;
+  console.log("🔄 Running SHEIN monitor…");
 
   const { browser, page } = await launchBrowser();
 
@@ -174,6 +217,7 @@ Removed: -${Math.max(0, (prevCounts.WOMEN || 0) - womenCount)}
 🕒 ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
 
     await sendTelegramBatched(summaryMsg);
+
     saveJSON(CONFIG.SNAPSHOT_COUNT, {
       MEN: menCount,
       WOMEN: womenCount,
@@ -200,7 +244,11 @@ New Products Added: ${added.length}
 `;
 
     added.slice(0, CONFIG.MAX_ITEMS_PER_ALERT).forEach((p, i) => {
-      alertMsg += `${i + 1}) ${p.title}\n${p.price}\n${p.link}\n\n`;
+      alertMsg += `${i + 1}) ${p.title}
+${p.price}
+${p.link}
+
+`;
     });
 
     if (added.length > CONFIG.MAX_ITEMS_PER_ALERT) {
@@ -215,8 +263,11 @@ New Products Added: ${added.length}
 
     await sendTelegramBatched(alertMsg);
     console.log(`🚨 MEN alert sent (${added.length})`);
+  } catch (err) {
+    console.error("❌ Run error:", err.message);
   } finally {
     await browser.close();
+    isRunning = false;
   }
 }
 
@@ -225,11 +276,7 @@ New Products Added: ${added.length}
 (async () => {
   await runOnce();
 
-  setInterval(async () => {
-    try {
-      await runOnce();
-    } catch (err) {
-      console.error("❌ Run failed:", err.message);
-    }
+  setInterval(() => {
+    runOnce();
   }, CONFIG.INTERVAL_MS);
 })();
