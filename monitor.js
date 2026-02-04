@@ -5,6 +5,8 @@ const fs = require("fs");
 const express = require("express");
 
 /* ================== EXPRESS (MANDATORY FOR RENDER) ================== */
+console.log("🔥 DEPLOY CHECK v3.1 — SELECTOR = rilrtl-products-list__link");
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
