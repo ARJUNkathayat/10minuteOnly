@@ -30,7 +30,7 @@ const CONFIG = {
   SNAPSHOT_COUNT: "count_snapshot.json",
   SNAPSHOT_MEN: "men_snapshot.json",
 
-  INTERVAL_MS: 8 * 60 * 1000,
+  INTERVAL_MS: 6* 60 * 1000,
 
   TG_MAX_LEN: 3800,
   TG_DELAY_MS: 800,
