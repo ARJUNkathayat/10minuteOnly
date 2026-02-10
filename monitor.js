@@ -5,8 +5,8 @@ const fs = require("fs");
 const express = require("express");
 
 /* ================== EXPRESS (MANDATORY FOR RENDER) ================== */
-console.log("🔥 DEPLOY CHECK v3.1 — SELECTOR = rilrtl-products-list__link");
 
+console.log("🔥 DEPLOY CHECK v4.0 — STABLE BUILD");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,7 +30,7 @@ const CONFIG = {
   SNAPSHOT_COUNT: "count_snapshot.json",
   SNAPSHOT_MEN: "men_snapshot.json",
 
-  INTERVAL_MS: 2* 60 * 1000,
+  INTERVAL_MS: 2 * 60 * 1000,
 
   TG_MAX_LEN: 3800,
   TG_DELAY_MS: 800,
@@ -39,8 +39,6 @@ const CONFIG = {
   MAX_ITEMS_PER_ALERT: 25,
   MAX_SCROLLS: 30,
 };
-
-/* ================= GLOBAL LOCK ================= */
 
 let isRunning = false;
 
@@ -98,7 +96,7 @@ async function sendTelegramBatched(text) {
 /* ================= BROWSER ================= */
 
 async function launchBrowser() {
-  const browser = await puppeteer.launch({
+  return puppeteer.launch({
     headless: "new",
     args: [
       "--no-sandbox",
@@ -107,7 +105,9 @@ async function launchBrowser() {
       "--disable-gpu",
     ],
   });
+}
 
+async function preparePage(browser) {
   const page = await browser.newPage();
 
   await page.setUserAgent(
@@ -116,13 +116,16 @@ async function launchBrowser() {
 
   await page.setViewport({ width: 1366, height: 768 });
 
-  return { browser, page };
+  page.setDefaultNavigationTimeout(90000);
+  page.setDefaultTimeout(60000);
+
+  return page;
 }
 
 /* ================= SCRAPERS ================= */
 
 async function scrapeCount(page, url) {
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.goto(url, { waitUntil: "networkidle2" });
 
   await page.waitForFunction(
     () =>
@@ -142,10 +145,7 @@ async function scrapeCount(page, url) {
 }
 
 async function scrapeMenProducts(page) {
-  await page.goto(CONFIG.MEN_URL, {
-    waitUntil: "domcontentloaded",
-    timeout: 90000,
-  });
+  await page.goto(CONFIG.MEN_URL, { waitUntil: "networkidle2" });
 
   await page.waitForSelector("a.rilrtl-products-list__link", {
     timeout: 30000,
@@ -156,7 +156,7 @@ async function scrapeMenProducts(page) {
 
     for (let i = 0; i < MAX_SCROLLS; i++) {
       window.scrollBy(0, 1200);
-      await new Promise((r) => setTimeout(r, 700));
+      await new Promise((r) => setTimeout(r, 800));
 
       const count = document.querySelectorAll(
         "a.rilrtl-products-list__link"
@@ -195,7 +195,7 @@ async function scrapeMenProducts(page) {
   });
 }
 
-/* ================= MAIN LOGIC ================= */
+/* ================= MAIN RUN ================= */
 
 async function runOnce() {
   if (isRunning) {
@@ -204,25 +204,33 @@ async function runOnce() {
   }
 
   isRunning = true;
-  console.log("🔄 Running SHEIN monitor By Arjun Kathayat…");
+  console.log("🔄 Running SHEIN monitor…");
 
   let browser;
 
   try {
-    const launched = await launchBrowser();
-    browser = launched.browser;
-    const page = launched.page;
+    browser = await launchBrowser();
 
     const prev = loadJSON(CONFIG.SNAPSHOT_COUNT, {});
-    const menCount = await scrapeCount(page, CONFIG.MEN_URL);
-    const womenCount = await scrapeCount(page, CONFIG.WOMEN_URL);
+
+    /* ---------- MEN COUNT ---------- */
+    const pageMenCount = await preparePage(browser);
+    const menCount = await scrapeCount(pageMenCount, CONFIG.MEN_URL);
+    await pageMenCount.close();
+
+    /* ---------- WOMEN COUNT ---------- */
+    const pageWomenCount = await preparePage(browser);
+    const womenCount = await scrapeCount(pageWomenCount, CONFIG.WOMEN_URL);
+    await pageWomenCount.close();
 
     const summary = `📦 SHEIN STOCK UPDATE
 
 MEN: ${menCount} (+${Math.max(0, menCount - (prev.MEN || 0))})
 WOMEN: ${womenCount} (+${Math.max(0, womenCount - (prev.WOMEN || 0))})
 
-🕒 ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`;
+🕒 ${new Date().toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+    })}`;
 
     await sendTelegramBatched(summary);
 
@@ -231,9 +239,12 @@ WOMEN: ${womenCount} (+${Math.max(0, womenCount - (prev.WOMEN || 0))})
       WOMEN: womenCount,
     });
 
-    const oldMen = loadJSON(CONFIG.SNAPSHOT_MEN, []);
-    const newMen = await scrapeMenProducts(page);
+    /* ---------- MEN PRODUCTS ---------- */
+    const pageMenProducts = await preparePage(browser);
+    const newMen = await scrapeMenProducts(pageMenProducts);
+    await pageMenProducts.close();
 
+    const oldMen = loadJSON(CONFIG.SNAPSHOT_MEN, []);
     const oldIds = new Set(oldMen.map((p) => p.id));
     const added = newMen.filter((p) => !oldIds.has(p.id));
 
@@ -261,5 +272,5 @@ WOMEN: ${womenCount} (+${Math.max(0, womenCount - (prev.WOMEN || 0))})
 
 /* ================= SCHEDULER ================= */
 
-setTimeout(runOnce, 15000); // first run after boot
+setTimeout(runOnce, 15000);
 setInterval(runOnce, CONFIG.INTERVAL_MS);
