@@ -1,6 +1,6 @@
 require("dotenv").config();
 const puppeteer = require("puppeteer");
-const axios = require("axios");
+const axios = require("axios")
 const fs = require("fs")
 const express = require("express");
 
