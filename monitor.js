@@ -3,7 +3,7 @@ const puppeteer = require("puppeteer");
 
 const axios = require("axios")
 const fs = require("fs")
-const express = require("express");
+const express = require("express")
 
 /* ================== EXPRESS (MANDATORY FOR RENDER) ================== */
 
